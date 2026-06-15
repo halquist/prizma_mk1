@@ -48,6 +48,10 @@ SemaphoreHandle_t frameReadySemaphore;
 SemaphoreHandle_t renderDoneSemaphore;
 SemaphoreHandle_t displayMutex;
 
+SemaphoreHandle_t workerStartSem;
+SemaphoreHandle_t workerDoneSem;
+FractalWorkerParams workerParams;
+
 TaskHandle_t producerHandle = NULL;
 TaskHandle_t consumerHandle = NULL;
 
@@ -284,6 +288,8 @@ void setup() {
   frameReadySemaphore = xSemaphoreCreateBinary();
   renderDoneSemaphore = xSemaphoreCreateBinary();
   displayMutex = xSemaphoreCreateMutex();
+  workerStartSem = xSemaphoreCreateBinary();
+  workerDoneSem  = xSemaphoreCreateBinary();
   // Producer may begin the first frame immediately.
   xSemaphoreGive(renderDoneSemaphore);
 
@@ -298,8 +304,11 @@ void setup() {
   outrunSprite.createSprite(SCREEN_WIDTH, SCREEN_HEIGHT);
   outrunSprite.fillSprite(TFT_BLACK);
 
-  xTaskCreate(producerTask, "Producer", 8192, NULL, 2, &producerHandle);
-  xTaskCreate(consumerTask, "Consumer", 4096, NULL, 1, &consumerHandle);
+  // Producer and consumer on Core 1 (Arduino default). Worker on Core 0 so both
+  // cores compute Mandelbrot lines in parallel during fractal generation.
+  xTaskCreatePinnedToCore(producerTask,      "Producer",      8192, NULL, 2, &producerHandle, 1);
+  xTaskCreatePinnedToCore(consumerTask,      "Consumer",      4096, NULL, 1, &consumerHandle, 1);
+  xTaskCreatePinnedToCore(fractalWorkerTask, "FractalWorker", 4096, NULL, 2, NULL,            0);
   xTaskCreate(batteryMonitorTask, "BatteryMonitor", 2048, NULL, 1, NULL);
 }
 

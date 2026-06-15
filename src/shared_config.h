@@ -57,6 +57,22 @@ extern SemaphoreHandle_t frameReadySemaphore;
 extern SemaphoreHandle_t renderDoneSemaphore;
 extern SemaphoreHandle_t displayMutex;
 
+// Dual-core fractal rendering: worker task on Core 0 renders the top half
+// of the quarter buffer while the producer renders the bottom half on Core 1.
+extern SemaphoreHandle_t workerStartSem;
+extern SemaphoreHandle_t workerDoneSem;
+
+struct FractalWorkerParams {
+  float cx, cy;
+  float cosA, sinA;
+  float dreal, dimag;
+  float anchorX, anchorY;
+  float invHalfW, invHalfH, zoomFactor;
+  int iterCap, radiusLimit;
+  int yStart, yEnd;
+};
+extern FractalWorkerParams workerParams;
+
 // Task handle
 extern TaskHandle_t producerHandle;
 extern TaskHandle_t consumerHandle;

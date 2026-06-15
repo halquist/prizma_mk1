@@ -91,40 +91,48 @@ int mandelbrotPoint(float real, float imag, int iterCap) {
   return iter;
 }
 
-void mandelbrotLine(uint8_t* line, int y, float minX, float maxX, float minY, float maxY, int iterCap, int radiusLimit, float cosA, float sinA) {
+// mandelbrotLine — incremental (DDA) coordinate stepping.
+// dreal/dimag are the per-pixel steps in complex-plane coords (constant for a given frame).
+// Precomputing them in mandelbrotGenerator avoids 6 muls per pixel here.
+void mandelbrotLine(uint8_t* line, int y, float cx, float cy,
+                    int iterCap, int radiusLimit,
+                    float cosA, float sinA,
+                    float dreal, float dimag,
+                    float anchorX, float anchorY,
+                    float invHalfW, float invHalfH, float zoomFactor) {
   const int halfW = SCREEN_WIDTH / 2;
-  const int halfH = SCREEN_HEIGHT / 2;
-  const float zoomFactor = (maxX - minX) / 2.0f;
-  const float cx = centerX;
-  const float cy = centerY;
 
-  const float invHalfW = 1.0f / (halfW - 1);
-  const float invHalfH = 1.0f / (halfH - 1);
+  // --- Precompute valid pixel range for this row (one sqrtf replaces 120 dx²+dy² checks) ---
+  const int dyInt = y - (int)anchorY;
+  const int dySq  = dyInt * dyInt;
+  const int radSq = radiusLimit * radiusLimit;
+  const int maxDxSq = radSq - dySq;
 
-  const float anchorMiddleX = halfW * 0.5f;
-  const float anchorMiddleY = halfH * 0.5f;
-  const float anchorCornerX = (float)halfW;
-  const float anchorCornerY = (float)halfH;
-  const float anchorX = anchorMiddleX + (anchorCornerX - anchorMiddleX) * anchorBlend;
-  const float anchorY = anchorMiddleY + (anchorCornerY - anchorMiddleY) * anchorBlend;
+  if (maxDxSq < 0) {
+    // Entire row is outside the circle — blank it and return.
+    memset(line, 0, halfW);
+    return;
+  }
 
-  for (int px = 0; px < halfW; px++) {
-    int dx = px - anchorX;
-    int dy = y - anchorY;
+  const int xRange = (int)sqrtf((float)maxDxSq);
+  const int xStart = max(0, (int)anchorX - xRange);
+  const int xEnd   = min(halfW - 1, (int)anchorX + xRange);
 
-    if (dx * dx + dy * dy > radiusLimit * radiusLimit) {
-      line[px] = 0;
-      continue;
-    }
+  // Zero the out-of-circle edge pixels.
+  if (xStart > 0)            memset(line, 0, xStart);
+  if (xEnd < halfW - 1)      memset(line + xEnd + 1, 0, halfW - 1 - xEnd);
 
-    float nx = dx * invHalfW;
-    float ny = dy * invHalfH;
-    float rx = nx * cosA - ny * sinA;
-    float ry = nx * sinA + ny * cosA;
+  // --- Compute starting complex coords at px = xStart ---
+  // real(px) = cx + [ (px - anchorX)*invHalfW * cosA - (y - anchorY)*invHalfH * sinA ] * zoomFactor
+  const float ny_row   = (float)dyInt * invHalfH;
+  const float rowConstR = (ny_row * (-sinA)) * zoomFactor;  // -sinA*ny term
+  const float rowConstI = (ny_row *   cosA)  * zoomFactor;  //  cosA*ny term
+  const float nx_start  = (float)(xStart - (int)anchorX) * invHalfW;
+  float real = cx + nx_start * cosA * zoomFactor + rowConstR;
+  float imag = cy + nx_start * sinA * zoomFactor + rowConstI;
 
-    float real = cx + rx * zoomFactor;
-    float imag = cy + ry * zoomFactor;
-
+  // --- Inner loop: only active pixels, no per-pixel circle check, no muls ---
+  for (int px = xStart; px <= xEnd; px++, real += dreal, imag += dimag) {
     int iter = mandelbrotPoint(real, imag, iterCap);
     line[px] = (iter == iterCap) ? 0 : iter % PALETTE_SIZE;
   }
@@ -197,18 +205,38 @@ void updateZoomAndCenter() {
 //     return (r << 11) | (g << 5) | b;
 // }
 
+// Worker task: renders the top half of the quarter buffer on Core 0 while the
+// producer renders the bottom half on Core 1.
+void fractalWorkerTask(void* pvParameters) {
+  for (;;) {
+    xSemaphoreTake(workerStartSem, portMAX_DELAY);
+    const FractalWorkerParams& p = workerParams;
+    const int halfW = SCREEN_WIDTH / 2;
+    for (int y = p.yStart; y < p.yEnd; y++) {
+      uint8_t* line = renderFB + y * halfW;
+      mandelbrotLine(line, y, p.cx, p.cy,
+                     p.iterCap, p.radiusLimit,
+                     p.cosA, p.sinA,
+                     p.dreal, p.dimag,
+                     p.anchorX, p.anchorY,
+                     p.invHalfW, p.invHalfH, p.zoomFactor);
+      if ((y & 15) == 0) vTaskDelay(1);
+    }
+    xSemaphoreGive(workerDoneSem);
+  }
+}
+
 void mandelbrotGenerator() {
   if (fractalWasPaused) {
-    // reset zoom update time so no accumulated delta
     lastZoomUpdateTime = millis();
     fractalWasPaused = false;
   }
 
+  const int halfW = SCREEN_WIDTH / 2;
+  const int halfH = SCREEN_HEIGHT / 2;
+  const int halfHalf = halfH / 2;  // line split point between cores
+
   float zoomFactor = 1.0f / powf(2.9f, zoomExponent);
-  float minX = centerX - zoomFactor;
-  float maxX = centerX + zoomFactor;
-  float minY = centerY - zoomFactor;
-  float maxY = centerY + zoomFactor;
 
   float zoomNorm = (zoomExponent - MIN_ZOOM) / (MAX_ZOOM - MIN_ZOOM);
   zoomNorm = constrain(zoomNorm, 0.0f, 1.0f);
@@ -219,38 +247,80 @@ void mandelbrotGenerator() {
   const float cosA = cosf(rotationAngle);
   const float sinA = sinf(rotationAngle);
 
-  for (int y = 0; y < SCREEN_HEIGHT / 2; y++) {
-    uint8_t* line = renderFB + y * (SCREEN_WIDTH / 2);
-    mandelbrotLine(line, y, minX, maxX, minY, maxY, iterCap, radiusLimit, cosA, sinA);
+  const float anchorX = halfW * 0.5f + (halfW - halfW * 0.5f) * anchorBlend;
+  const float anchorY = halfH * 0.5f + (halfH - halfH * 0.5f) * anchorBlend;
+
+  const float invHalfW = 1.0f / (halfW - 1);
+  const float invHalfH = 1.0f / (halfH - 1);
+
+  // Per-pixel complex-plane step (constant for the entire frame).
+  const float dreal = invHalfW * cosA * zoomFactor;
+  const float dimag = invHalfW * sinA * zoomFactor;
+
+  // Hand the top half of lines (0..halfHalf-1) to the worker on Core 0.
+  workerParams = { centerX, centerY,
+                   cosA, sinA,
+                   dreal, dimag,
+                   anchorX, anchorY,
+                   invHalfW, invHalfH, zoomFactor,
+                   iterCap, radiusLimit,
+                   0, halfHalf };
+  xSemaphoreGive(workerStartSem);  // start Core 0 worker
+
+  // Render bottom half of lines (halfHalf..halfH-1) on Core 1 (this task).
+  for (int y = halfHalf; y < halfH; y++) {
+    uint8_t* line = renderFB + y * halfW;
+    mandelbrotLine(line, y, centerX, centerY,
+                   iterCap, radiusLimit,
+                   cosA, sinA,
+                   dreal, dimag,
+                   anchorX, anchorY,
+                   invHalfW, invHalfH, zoomFactor);
     if ((y & 15) == 0) vTaskDelay(1);
   }
+
+  // Wait for Core 0 to finish before swapping buffers.
+  xSemaphoreTake(workerDoneSem, portMAX_DELAY);
+
   updateZoomAndCenter();
   updatePaletteShift(zoomExponent);
 }
 
 void fractalRender() {
-  const int radiusLimit = 121;
-  const int radiusSq = radiusLimit * radiusLimit;
+  // Build each full 240-pixel row into a stack buffer (fast internal SRAM), then
+  // memcpy it to PSRAM for both the top and mirrored bottom rows. This gives the
+  // PSRAM controller sequential burst writes instead of 4 scattered stores per pixel.
+  uint16_t rowBuf[SCREEN_WIDTH];
 
-  for (int y = 0; y < SCREEN_HEIGHT / 2; y++) {
-    uint8_t* row = displayFB + y * (SCREEN_WIDTH / 2);
-    int ym = SCREEN_HEIGHT - 1 - y;
+  const int halfW  = SCREEN_WIDTH / 2;
+  const int halfH  = SCREEN_HEIGHT / 2;
+  const int radSq  = 121 * 121;
 
-    for (int x = 0; x < SCREEN_WIDTH / 2; x++) {
-      int xm = SCREEN_WIDTH - 1 - x;
-      int dx = x - CENTER_X;
-      int dy = y - CENTER_Y;
+  for (int y = 0; y < halfH; y++) {
+    const uint8_t* row = displayFB + y * halfW;
+    const int ym  = SCREEN_HEIGHT - 1 - y;
+    const int dy  = y - CENTER_Y;
+    const int dySq = dy * dy;
 
-      uint8_t paletteIndex = row[x];
-      uint16_t color = (dx*dx + dy*dy <= radiusSq)
-                       ? ((paletteIndex == 0) ? 0 : palette[paletteIndex])
-                       : 0;
-
-      fractalFramebuffer[y  * SCREEN_WIDTH + x]  = color;
-      fractalFramebuffer[y  * SCREEN_WIDTH + xm] = color;
-      fractalFramebuffer[ym * SCREEN_WIDTH + x]  = color;
-      fractalFramebuffer[ym * SCREEN_WIDTH + xm] = color;
+    if (dySq > radSq) {
+      // Entire row is outside the circle — blank both rows.
+      memset(rowBuf, 0, sizeof(rowBuf));
+    } else {
+      const int maxDxSq = radSq - dySq;
+      for (int x = 0; x < halfW; x++) {
+        const int dx = x - CENTER_X;
+        uint8_t idx = row[x];
+        uint16_t color = (dx*dx <= maxDxSq)
+                         ? ((idx == 0) ? 0 : palette[idx])
+                         : 0;
+        rowBuf[x]               = color;   // left half
+        rowBuf[SCREEN_WIDTH-1-x] = color;  // right half (mirror)
+      }
     }
+
+    memcpy(&fractalFramebuffer[y  * SCREEN_WIDTH], rowBuf, SCREEN_WIDTH * sizeof(uint16_t));
+    memcpy(&fractalFramebuffer[ym * SCREEN_WIDTH], rowBuf, SCREEN_WIDTH * sizeof(uint16_t));
+
     if ((y & 31) == 0) vTaskDelay(1);
   }
 
