@@ -200,7 +200,10 @@ void renderActiveMode(unsigned long now) {
   }
 
   lastDraw = millis();
-  fpsMonitorTick(currentMode);
+  // Fractal/shader/deep_end FPS is measured in consumerTask after a full frame is displayed.
+  if (currentMode != MODE_FRACTAL && currentMode != MODE_SHADER && currentMode != MODE_DEEP_END) {
+    fpsMonitorTick(currentMode);
+  }
 }
 
 const int unusedPins[] = {

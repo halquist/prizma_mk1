@@ -40,6 +40,15 @@
 #define LOAD_GFXFF
 #define SMOOTH_FONT
 
-// SPI speed — Waveshare Setup302 uses 40 MHz
-#define SPI_FREQUENCY       40000000
+// SPI speed — 80 MHz halves transfer time (115 KB → ~11.5 ms) to reduce screen tearing.
+// The GC9A01A supports up to 100 MHz; if signal integrity issues arise, try 60000000 first.
+#define SPI_FREQUENCY       80000000
 #define SPI_READ_FREQUENCY  20000000
+
+// TE (Tearing Effect) pin — full anti-tear fix.
+// The GC9A01A has a TE output and the Waveshare firmware enables it (0x35 in LCD_1in28.cpp).
+// However the TE pin does not appear to be routed to any GPIO on this board variant;
+// DEV_Config.h defines no pin for it, and the schematic shows no connection.
+// If a future board revision exposes TE (e.g. GPIO 40), uncomment the line below.
+// TFT_eSPI will then automatically sync each pushImage call to the display's VBL.
+// #define TFT_TE 40

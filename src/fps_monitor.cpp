@@ -5,6 +5,7 @@
 
 static uint32_t frameCount = 0;
 static uint32_t windowStartMs = 0;
+static RenderMode lastMode = MODE_MENU;
 
 static const char* modeLabel(RenderMode mode) {
   switch (mode) {
@@ -25,6 +26,10 @@ void fpsMonitorReset(void) {
 }
 
 void fpsMonitorTick(RenderMode mode) {
+  if (mode != lastMode) {
+    lastMode = mode;
+    fpsMonitorReset();
+  }
   if (windowStartMs == 0) {
     fpsMonitorReset();
   }

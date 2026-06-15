@@ -18,6 +18,9 @@ float MAX_ZOOM = 11.4f;
 float MIN_ZOOM = 1.0f;
 float rotationAngle = 0.0f;  // In radians
 const float panSpeed = 0.04f;
+// Continuous-rate constant equivalent to panSpeed per frame at 60 fps.
+// Using this with deltaSec gives frame-rate-independent pan convergence.
+const float panK = -logf(1.0f - panSpeed) * 60.0f;
 bool zoomingEnabled = false;
 const float ZOOM_EXP_SPEED_PER_SEC = 0.25f;
 uint32_t lastZoomUpdateTime = 0;
@@ -30,19 +33,17 @@ bool fractalWasPaused = false;
 
 int mandelbrotPoint(float real, float imag, int iterCap) {
   // Fast rejection: skip iteration for points inside the main cardioid or period-2 bulb.
-  // These cover the large interior regions visible at low/mid zoom for free.
   float q = (real - 0.25f) * (real - 0.25f) + imag * imag;
   if (q * (q + (real - 0.25f)) < 0.25f * imag * imag) return iterCap;
   if ((real + 1.0f) * (real + 1.0f) + imag * imag < 0.0625f) return iterCap;
 
   float zReal = 0.0f, zImag = 0.0f;
-  float zReal2 = 0.0f, zImag2 = 0.0f;  // Precomputed squares
+  float zReal2 = 0.0f, zImag2 = 0.0f;
   int iter = 0;
 
   while ((zReal2 + zImag2 <= 4.0f) && iter < iterCap) {
     zImag = 2.0f * zReal * zImag + imag;
     zReal = zReal2 - zImag2 + real;
-
     zReal2 = zReal * zReal;
     zImag2 = zImag * zImag;
     iter++;
@@ -53,15 +54,13 @@ int mandelbrotPoint(float real, float imag, int iterCap) {
 void mandelbrotLine(uint8_t* line, int y, float minX, float maxX, float minY, float maxY, int iterCap, int radiusLimit, float cosA, float sinA) {
   const int halfW = SCREEN_WIDTH / 2;
   const int halfH = SCREEN_HEIGHT / 2;
-  const float zoomFactor = (maxX - minX) / 2.0f;  // assuming square zoom
+  const float zoomFactor = (maxX - minX) / 2.0f;
   const float cx = centerX;
   const float cy = centerY;
 
-  // Correct normalization denominator
   const float invHalfW = 1.0f / (halfW - 1);
   const float invHalfH = 1.0f / (halfH - 1);
 
-  // Define rotation anchor point
   float anchorX = rotationCenterIsMiddle ? (halfW / 2.0f) : halfW;
   float anchorY = rotationCenterIsMiddle ? (halfH / 2.0f) : halfH;
 
@@ -74,15 +73,11 @@ void mandelbrotLine(uint8_t* line, int y, float minX, float maxX, float minY, fl
       continue;
     }
 
-    // Normalize relative to the anchor point (corrected)
     float nx = dx * invHalfW;
     float ny = dy * invHalfH;
-
-    // Rotate
     float rx = nx * cosA - ny * sinA;
     float ry = nx * sinA + ny * cosA;
 
-    // Scale and shift to fractal plane
     float real = cx + rx * zoomFactor;
     float imag = cy + ry * zoomFactor;
 
@@ -103,9 +98,12 @@ void updateZoomAndCenter() {
   const float ZOOM_PAN_THRESHOLD = 0.05f;
 
   if (zoomingIn && (fabs(dx) > PAN_EPSILON || fabs(dy) > PAN_EPSILON)) {
-    centerX += dx * panSpeed;
-    centerY += dy * panSpeed;
-  } 
+    // Time-based exponential lerp — converges at the same real-world speed
+    // regardless of frame rate.
+    float alpha = 1.0f - expf(-panK * deltaSec);
+    centerX += dx * alpha;
+    centerY += dy * alpha;
+  }
 
   rotationAngle = rotationSpeed * sinf(zoomExponent * 0.8f);  // radiansrotationAngle = 0.4f * zoomExponent;  // Adjust multiplier for rotation speed
 
@@ -148,15 +146,15 @@ void mandelbrotGenerator() {
     fractalWasPaused = false;
   }
 
-  float zoomFactor = 1.0f / pow(2.9f, zoomExponent);
+  float zoomFactor = 1.0f / powf(2.9f, zoomExponent);
   float minX = centerX - zoomFactor;
   float maxX = centerX + zoomFactor;
   float minY = centerY - zoomFactor;
   float maxY = centerY + zoomFactor;
 
   float zoomNorm = (zoomExponent - MIN_ZOOM) / (MAX_ZOOM - MIN_ZOOM);
-  zoomNorm = constrain(zoomNorm, 0.0f, 1.0f);  // Ensure 0–1 range
-  int iterCap = MIN_ITER + zoomNorm * (MAX_ITER - MIN_ITER);
+  zoomNorm = constrain(zoomNorm, 0.0f, 1.0f);
+  int iterCap = MIN_ITER + (int)(zoomNorm * (MAX_ITER - MIN_ITER));
 
   int radiusLimit = (SCREEN_WIDTH / 2) + 2;
 
@@ -166,9 +164,8 @@ void mandelbrotGenerator() {
   for (int y = 0; y < SCREEN_HEIGHT / 2; y++) {
     uint8_t* line = renderFB + y * (SCREEN_WIDTH / 2);
     mandelbrotLine(line, y, minX, maxX, minY, maxY, iterCap, radiusLimit, cosA, sinA);
-    if ((y & 15) == 0) vTaskDelay(1);  // feed IDLE task watchdog on CPU 0
+    if ((y & 15) == 0) vTaskDelay(1);
   }
-
   updateZoomAndCenter();
   updatePaletteShift(zoomExponent);
 }
