@@ -246,6 +246,9 @@ void setup() {
 #ifndef FPS_MONITOR
   disableUART0();
 #endif
+
+  findFractalEdgePoint(0);
+  beginPanToTarget(false);
   initPalette();
   touch.begin();
 
@@ -298,9 +301,6 @@ void setup() {
   xTaskCreate(producerTask, "Producer", 8192, NULL, 2, &producerHandle);
   xTaskCreate(consumerTask, "Consumer", 4096, NULL, 1, &consumerHandle);
   xTaskCreate(batteryMonitorTask, "BatteryMonitor", 2048, NULL, 1, NULL);
-  // Low-priority background task for fractal region searches; avoids stutter
-  // on zoom reset and the blocking startup delay.
-  xTaskCreate(regionSearchTask, "RegionSearch", 8192, NULL, 0, NULL);
 }
 
 void loop() {

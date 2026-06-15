@@ -17,19 +17,59 @@ bool zoomingIn = true;
 float MAX_ZOOM = 11.4f;
 float MIN_ZOOM = 1.0f;
 float rotationAngle = 0.0f;  // In radians
-const float panSpeed = 0.04f;
-// Continuous-rate constant equivalent to panSpeed per frame at 60 fps.
-// Using this with deltaSec gives frame-rate-independent pan convergence.
-const float panK = -logf(1.0f - panSpeed) * 60.0f;
 bool zoomingEnabled = false;
 const float ZOOM_EXP_SPEED_PER_SEC = 0.25f;
+const float PAN_DURATION_SEC = 5.0f;  // total eased pan time after picking a new point
 uint32_t lastZoomUpdateTime = 0;
-bool rotationCenterIsMiddle = (random(0,2) == 2);  // true = middle, false = bottom-right
+bool rotationCenterIsMiddle = (random(0, 2) == 1);
 float rotationMin = 0.95f;
 float rotationMax = 1.95f;
 float rotationSpeed = rotationCenterIsMiddle ? rotationMin : rotationMax;
 
 bool fractalWasPaused = false;
+
+static bool panActive = false;
+static float panStartX = 0.0f;
+static float panStartY = 0.0f;
+static float panElapsed = 0.0f;
+// 0 = rotation anchor at quadrant center, 1 = anchor at quadrant corner (mirrored to screen center).
+static float anchorBlend = 0.0f;
+static float anchorBlendStart = 0.0f;
+static float anchorBlendTarget = 0.0f;
+static float rotationSpeedStart = 0.0f;
+static float rotationSpeedTarget = 0.0f;
+
+static float easeInOut(float t) {
+  t = constrain(t, 0.0f, 1.0f);
+  // Smoothstep: zero velocity at start and end, peak in the middle.
+  return t * t * (3.0f - 2.0f * t);
+}
+
+void beginPanToTarget(bool transitionRotationAnchor) {
+  panStartX = centerX;
+  panStartY = centerY;
+  panElapsed = 0.0f;
+  panActive = true;
+
+  anchorBlendStart = anchorBlend;
+  rotationSpeedStart = rotationSpeed;
+
+  if (!transitionRotationAnchor) {
+    anchorBlend = rotationCenterIsMiddle ? 0.0f : 1.0f;
+    anchorBlendStart = anchorBlend;
+    rotationSpeedStart = rotationSpeed;
+  }
+
+  if (transitionRotationAnchor) {
+    bool newMiddle = (random(0, 2) == 1);
+    anchorBlendTarget = newMiddle ? 0.0f : 1.0f;
+    rotationSpeedTarget = newMiddle ? rotationMin : rotationMax;
+    rotationCenterIsMiddle = newMiddle;
+  } else {
+    anchorBlendTarget = anchorBlendStart;
+    rotationSpeedTarget = rotationSpeedStart;
+  }
+}
 
 int mandelbrotPoint(float real, float imag, int iterCap) {
   // Fast rejection: skip iteration for points inside the main cardioid or period-2 bulb.
@@ -61,8 +101,12 @@ void mandelbrotLine(uint8_t* line, int y, float minX, float maxX, float minY, fl
   const float invHalfW = 1.0f / (halfW - 1);
   const float invHalfH = 1.0f / (halfH - 1);
 
-  float anchorX = rotationCenterIsMiddle ? (halfW / 2.0f) : halfW;
-  float anchorY = rotationCenterIsMiddle ? (halfH / 2.0f) : halfH;
+  const float anchorMiddleX = halfW * 0.5f;
+  const float anchorMiddleY = halfH * 0.5f;
+  const float anchorCornerX = (float)halfW;
+  const float anchorCornerY = (float)halfH;
+  const float anchorX = anchorMiddleX + (anchorCornerX - anchorMiddleX) * anchorBlend;
+  const float anchorY = anchorMiddleY + (anchorCornerY - anchorMiddleY) * anchorBlend;
 
   for (int px = 0; px < halfW; px++) {
     int dx = px - anchorX;
@@ -94,21 +138,38 @@ void updateZoomAndCenter() {
 
   float dx = targetCenterX - centerX;
   float dy = targetCenterY - centerY;
-  const float PAN_EPSILON = 0.0000001f;
-  const float ZOOM_PAN_THRESHOLD = 0.05f;
 
-  if (zoomingIn && (fabs(dx) > PAN_EPSILON || fabs(dy) > PAN_EPSILON)) {
-    // Time-based exponential lerp — converges at the same real-world speed
-    // regardless of frame rate.
-    float alpha = 1.0f - expf(-panK * deltaSec);
-    centerX += dx * alpha;
-    centerY += dy * alpha;
+  // Eased pan at full zoom-out: accelerate from rest, decelerate into the target.
+  if (zoomingIn && !zoomingEnabled && panActive) {
+    panElapsed += deltaSec;
+    float t = panElapsed / PAN_DURATION_SEC;
+    float eased = easeInOut(t);
+    centerX = panStartX + (targetCenterX - panStartX) * eased;
+    centerY = panStartY + (targetCenterY - panStartY) * eased;
+    anchorBlend = anchorBlendStart + (anchorBlendTarget - anchorBlendStart) * eased;
+    rotationSpeed = rotationSpeedStart + (rotationSpeedTarget - rotationSpeedStart) * eased;
+
+    if (t >= 1.0f) {
+      centerX = targetCenterX;
+      centerY = targetCenterY;
+      anchorBlend = anchorBlendTarget;
+      rotationSpeed = rotationSpeedTarget;
+      panActive = false;
+      zoomingEnabled = true;
+    }
   }
+
+  dx = targetCenterX - centerX;
+  dy = targetCenterY - centerY;
 
   rotationAngle = rotationSpeed * sinf(zoomExponent * 0.8f);  // radiansrotationAngle = 0.4f * zoomExponent;  // Adjust multiplier for rotation speed
 
-  if (fabs(dx) <= ZOOM_PAN_THRESHOLD && fabs(dy) <= ZOOM_PAN_THRESHOLD) {
-    zoomingEnabled = true;
+  // If already at the target (e.g. first boot with no travel), allow zoom immediately.
+  if (!panActive && zoomingIn && !zoomingEnabled) {
+    const float ZOOM_PAN_THRESHOLD = 0.05f;
+    if (fabs(dx) <= ZOOM_PAN_THRESHOLD && fabs(dy) <= ZOOM_PAN_THRESHOLD) {
+      zoomingEnabled = true;
+    }
   }
 
   if (zoomingIn && zoomingEnabled) {
@@ -123,11 +184,8 @@ void updateZoomAndCenter() {
       zoomExponent = MIN_ZOOM;
       zoomingIn = true;
       zoomingEnabled = false;
-      regionSearchPending = true;  // kick off background search, non-blocking
-
-      // Randomly pick rotation center
-      rotationCenterIsMiddle = (random(0, 2) == 1);
-      rotationSpeed = rotationCenterIsMiddle ? rotationMin : rotationMax;
+      findFractalEdgePoint(0);
+      beginPanToTarget(true);
     }
   }
 }

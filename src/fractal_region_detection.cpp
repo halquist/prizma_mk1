@@ -3,20 +3,6 @@
 #include "fractal_region_detection.h"
 #include <Arduino.h>
 
-// Starts as true so the initial region search runs at boot without blocking setup().
-volatile bool regionSearchPending = true;
-
-void regionSearchTask(void* pvParameters) {
-  for (;;) {
-    if (regionSearchPending) {
-      regionSearchPending = false;
-      findFractalEdgePoint(0);
-    }
-    vTaskDelay(pdMS_TO_TICKS(100));
-  }
-}
-
-
 #define VERIFY_PREVIEW_SIZE 32
 uint8_t verifyPreview[VERIFY_PREVIEW_SIZE * VERIFY_PREVIEW_SIZE];
 
@@ -150,36 +136,60 @@ void findFractalEdgePoint(int retryDepth) {
 
   bool useAltLocalDetail = (random(0, 2) == 1);
 
-  float bestCoarseX = 0.0f, bestCoarseY = 0.0f;
-  float bestCoarseScore = -1.0f;
+  // Keep the top 5 coarse candidates instead of just the single best.
+  // Randomly selecting among them prevents the same dominant boundary
+  // region from winning every cycle.
+  const int TOP_N = 5;
+  float topX[TOP_N] = {}, topY[TOP_N] = {};
+  float topScore[TOP_N] = { -1, -1, -1, -1, -1 };
+  int topCount = 0;
 
   // Coarse scan
   for (int i = 0; i < coarseSamples; ++i) {
     float x = randomFloat(-2.0f, 1.0f);
     float y = randomFloat(-1.5f, 1.5f);
-    // float score = useAltLocalDetail ? localDetail(x, y, coarseIterCap) : evaluateDetailScore(x, y, coarseIterCap);
     float score = evaluateDetailScore(x, y, coarseIterCap);
-    if (score > bestCoarseScore && score > MIN_DETAIL_SCORE) {
-      bestCoarseScore = score;
-      bestCoarseX = x;
-      bestCoarseY = y;
+    if (score <= MIN_DETAIL_SCORE) continue;
+
+    // Insert into top-N (insertion sort on the small fixed array)
+    if (topCount < TOP_N || score > topScore[TOP_N - 1]) {
+      int pos = topCount < TOP_N ? topCount : TOP_N - 1;
+      // Find insertion position
+      while (pos > 0 && score > topScore[pos - 1]) pos--;
+      // Shift down
+      int last = (topCount < TOP_N) ? topCount : TOP_N - 1;
+      for (int j = last; j > pos; j--) {
+        topX[j] = topX[j - 1];
+        topY[j] = topY[j - 1];
+        topScore[j] = topScore[j - 1];
+      }
+      topX[pos] = x;
+      topY[pos] = y;
+      topScore[pos] = score;
+      if (topCount < TOP_N) topCount++;
     }
   }
+
+  // Randomly pick one of the top candidates (uniform — all are already
+  // above MIN_DETAIL_SCORE and represent genuinely interesting regions).
+  int pick = (topCount > 0) ? random(0, topCount) : 0;
+  float bestCoarseX = (topCount > 0) ? topX[pick] : 0.0f;
+  float bestCoarseY = (topCount > 0) ? topY[pick] : 0.0f;
 
   float bestFineX = bestCoarseX;
   float bestFineY = bestCoarseY;
   float bestFineScore = -1.0f;
 
-  // Fine scan
+  // Fine scan — uniform disk around the coarse point (full 360°).
+  // Previously only searched upper-left (−dx, −dy), missing 3/4 of the
+  // refinement neighborhood.
   for (int i = 0; i < fineSamples; ++i) {
-    float dx = randomFloat(0.0f, fineRadius);
-    float dy = randomFloat(0.0f, fineRadius);
-
-    float x = bestCoarseX - dx;  // upper-left quadrant
-    float y = bestCoarseY - dy;
+    float angle = randomFloat(0.0f, 6.28318f);
+    float radius = randomFloat(0.0f, fineRadius);
+    float x = bestCoarseX + cosf(angle) * radius;
+    float y = bestCoarseY + sinf(angle) * radius;
 
     float score = useAltLocalDetail ? zoomAwareDetailScore(x, y, zoomFactor, fineIterCap) : evaluateDetailScore(x, y, fineIterCap);
-    // float score = evaluateDetailScore(x, y, fineIterCap);
 
     if (score > bestFineScore && score > MIN_DETAIL_SCORE && verifyZoomTarget(x, y, zoomFactor)) {
       bestFineScore = score;
